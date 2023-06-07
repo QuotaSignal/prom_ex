@@ -166,6 +166,8 @@ if Code.ensure_loaded?(Phoenix) do
     alias Plug.Conn
     alias PromEx.Utils
 
+    @init_event_url [:prom_ex, :plugin, :phoenix, :endpoint_url]
+    @init_event_port [:prom_ex, :plugin, :phoenix, :endpoint_port]
     @stop_event [:prom_ex, :plugin, :phoenix, :stop]
 
     @impl true
@@ -180,91 +182,39 @@ if Code.ensure_loaded?(Phoenix) do
 
       # Event metrics definitions
       [
+        phoenix_init_event_metrics(opts),
         http_events(metric_prefix, opts),
         channel_events(metric_prefix, duration_unit, normalize_event_name),
         socket_events(metric_prefix, duration_unit)
       ]
     end
 
-    @impl true
-    def manual_metrics(opts) do
+    defp phoenix_init_event_metrics(opts) do
       otp_app = Keyword.fetch!(opts, :otp_app)
       metric_prefix = Keyword.get(opts, :metric_prefix, PromEx.metric_prefix(otp_app, :phoenix))
-
-      [
-        endpoint_info(metric_prefix, opts)
-      ]
+      [endpoint_info(metric_prefix)]
     end
 
-    defp endpoint_info(metric_prefix, opts) do
-      # Fetch user options
-      otp_app = Keyword.get(opts, :otp_app)
-      phoenix_endpoint = Keyword.get(opts, :endpoint) || Keyword.get(opts, :endpoints)
-
-      Manual.build(
-        :phoenix_endpoint_manual_metrics,
-        {__MODULE__, :execute_phoenix_endpoint_info, [phoenix_endpoint, otp_app]},
+    defp endpoint_info(metric_prefix) do
+      Event.build(
+        :phoenix_endpoint_metrics,
         [
           last_value(
             metric_prefix ++ [:endpoint, :url, :info],
-            event_name: [:prom_ex, :plugin, :phoenix, :endpoint_url],
+            event_name: @init_event_url,
             description: "The configured URL of the Endpoint module.",
             measurement: :status,
             tags: [:url, :endpoint]
           ),
           last_value(
             metric_prefix ++ [:endpoint, :port, :info],
-            event_name: [:prom_ex, :plugin, :phoenix, :endpoint_port],
+            event_name: @init_event_port,
             description: "The configured port of the Endpoint module.",
             measurement: :status,
             tags: [:port, :endpoint]
           )
         ]
       )
-    end
-
-    @doc false
-    def execute_phoenix_endpoint_info(endpoint, otp_app) do
-      # TODO: This is a bit of a hack until Phoenix supports an init telemetry event to
-      # reliably get the configuration.
-      endpoint_init_checker = fn
-        count, endpoint_module, endpoint_init_checker_function, otp_app when count < 10 ->
-          case Process.whereis(endpoint_module) do
-            pid when is_pid(pid) ->
-              measurements = %{status: 1}
-              url_metadata = %{url: endpoint_module.url(), endpoint: normalize_module_name(endpoint_module)}
-              :telemetry.execute([:prom_ex, :plugin, :phoenix, :endpoint_url], measurements, url_metadata)
-
-              %URI{port: port} = endpoint_module.struct_url()
-              port_metadata = %{port: port, endpoint: normalize_module_name(endpoint_module)}
-              :telemetry.execute([:prom_ex, :plugin, :phoenix, :endpoint_port], measurements, port_metadata)
-
-            _ ->
-              if Phoenix.Endpoint.server?(otp_app, endpoint_module) do
-                # if the endpoint started, but the process is not registered yet, wait a bit and try again
-                endpoint_init_checker_function.(count + 1, endpoint_module, endpoint_init_checker_function, otp_app)
-              else
-                # wait for the endpoint to start
-                endpoint_init_checker_function.(0, endpoint_module, endpoint_init_checker_function, otp_app)
-              end
-          end
-
-        _, _, _, _ ->
-          :noop
-      end
-
-      if is_list(endpoint) do
-        endpoint
-        |> Enum.each(fn {endpoint_module, _} ->
-          Task.start(fn ->
-            endpoint_init_checker.(0, endpoint_module, endpoint_init_checker, otp_app)
-          end)
-        end)
-      else
-        Task.start(fn ->
-          endpoint_init_checker.(0, endpoint, endpoint_init_checker, otp_app)
-        end)
-      end
     end
 
     defp http_events(metric_prefix, opts) do
