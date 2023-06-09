@@ -166,6 +166,7 @@ if Code.ensure_loaded?(Phoenix) do
     alias Plug.Conn
     alias PromEx.Utils
 
+    @init_event [:prom_ex, :plugin, :phoenix, :init]
     @stop_event [:prom_ex, :plugin, :phoenix, :stop]
 
     @impl true
@@ -177,7 +178,6 @@ if Code.ensure_loaded?(Phoenix) do
       normalize_event_name = Keyword.get(opts, :normalize_event_name, fn event -> event end)
 
       set_up_telemetry_proxy(phoenix_event_prefixes)
-
       # Event metrics definitions
       [
         http_events(metric_prefix, opts),
@@ -190,14 +190,10 @@ if Code.ensure_loaded?(Phoenix) do
     def manual_metrics(opts) do
       otp_app = Keyword.fetch!(opts, :otp_app)
       metric_prefix = Keyword.get(opts, :metric_prefix, PromEx.metric_prefix(otp_app, :phoenix))
-
-      [
-        endpoint_info(metric_prefix, opts)
-      ]
+      [endpoint_info(metric_prefix, opts)]
     end
 
     defp endpoint_info(metric_prefix, opts) do
-      # Fetch user options
       phoenix_endpoint = Keyword.get(opts, :endpoint) || Keyword.get(opts, :endpoints)
 
       Manual.build(
@@ -206,14 +202,14 @@ if Code.ensure_loaded?(Phoenix) do
         [
           last_value(
             metric_prefix ++ [:endpoint, :url, :info],
-            event_name: [:prom_ex, :plugin, :phoenix, :endpoint_url],
+            event_name: @init_event ++ [:endpoint_url],
             description: "The configured URL of the Endpoint module.",
             measurement: :status,
             tags: [:url, :endpoint]
           ),
           last_value(
             metric_prefix ++ [:endpoint, :port, :info],
-            event_name: [:prom_ex, :plugin, :phoenix, :endpoint_port],
+            event_name: @init_event ++ [:endpoint_port],
             description: "The configured port of the Endpoint module.",
             measurement: :status,
             tags: [:port, :endpoint]
@@ -232,11 +228,11 @@ if Code.ensure_loaded?(Phoenix) do
             pid when is_pid(pid) ->
               measurements = %{status: 1}
               url_metadata = %{url: endpoint_module.url(), endpoint: normalize_module_name(endpoint_module)}
-              :telemetry.execute([:prom_ex, :plugin, :phoenix, :endpoint_url], measurements, url_metadata)
+              :telemetry.execute(@init_event ++ [:endpoint_url], measurements, url_metadata)
 
               %URI{port: port} = endpoint_module.struct_url()
               port_metadata = %{port: port, endpoint: normalize_module_name(endpoint_module)}
-              :telemetry.execute([:prom_ex, :plugin, :phoenix, :endpoint_port], measurements, port_metadata)
+              :telemetry.execute(@init_event ++ [:endpoint_port], measurements, port_metadata)
 
             _ ->
               Process.sleep(1_000)
