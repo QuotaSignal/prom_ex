@@ -166,8 +166,7 @@ if Code.ensure_loaded?(Phoenix) do
     alias Plug.Conn
     alias PromEx.Utils
 
-    @init_event_url [:prom_ex, :plugin, :phoenix, :endpoint_url]
-    @init_event_port [:prom_ex, :plugin, :phoenix, :endpoint_port]
+    @init_event [:prom_ex, :plugin, :phoenix, :init]
     @stop_event [:prom_ex, :plugin, :phoenix, :stop]
 
     @impl true
@@ -179,42 +178,83 @@ if Code.ensure_loaded?(Phoenix) do
       normalize_event_name = Keyword.get(opts, :normalize_event_name, fn event -> event end)
 
       set_up_telemetry_proxy(phoenix_event_prefixes)
-
       # Event metrics definitions
       [
-        phoenix_init_event_metrics(opts),
         http_events(metric_prefix, opts),
         channel_events(metric_prefix, duration_unit, normalize_event_name),
         socket_events(metric_prefix, duration_unit)
       ]
     end
 
-    defp phoenix_init_event_metrics(opts) do
+    @impl true
+    def manual_metrics(opts) do
       otp_app = Keyword.fetch!(opts, :otp_app)
       metric_prefix = Keyword.get(opts, :metric_prefix, PromEx.metric_prefix(otp_app, :phoenix))
-      [endpoint_info(metric_prefix)]
+      [endpoint_info(metric_prefix, opts)]
     end
 
-    defp endpoint_info(metric_prefix) do
-      Event.build(
-        :phoenix_endpoint_metrics,
+    defp endpoint_info(metric_prefix, opts) do
+      phoenix_endpoint = Keyword.get(opts, :endpoint) || Keyword.get(opts, :endpoints)
+
+      Manual.build(
+        :phoenix_endpoint_manual_metrics,
+        {__MODULE__, :execute_phoenix_endpoint_info, [phoenix_endpoint]},
         [
           last_value(
             metric_prefix ++ [:endpoint, :url, :info],
-            event_name: @init_event_url,
+            event_name: @init_event ++ [:endpoint_url],
             description: "The configured URL of the Endpoint module.",
             measurement: :status,
             tags: [:url, :endpoint]
           ),
           last_value(
             metric_prefix ++ [:endpoint, :port, :info],
-            event_name: @init_event_port,
+            event_name: @init_event ++ [:endpoint_port],
             description: "The configured port of the Endpoint module.",
             measurement: :status,
             tags: [:port, :endpoint]
           )
         ]
       )
+    end
+
+    @doc false
+    def execute_phoenix_endpoint_info(endpoint) do
+      # TODO: This is a bit of a hack until Phoenix supports an init telemetry event to
+      # reliably get the configuration.
+      endpoint_init_checker = fn
+        count, endpoint_module, endpoint_init_checker_function when count < 10 ->
+          case Process.whereis(endpoint_module) do
+            pid when is_pid(pid) ->
+              measurements = %{status: 1}
+              url_metadata = %{url: endpoint_module.url(), endpoint: normalize_module_name(endpoint_module)}
+              :telemetry.execute(@init_event ++ [:endpoint_url], measurements, url_metadata)
+
+              %URI{port: port} = endpoint_module.struct_url()
+              port_metadata = %{port: port, endpoint: normalize_module_name(endpoint_module)}
+              :telemetry.execute(@init_event ++ [:endpoint_port], measurements, port_metadata)
+
+            _ ->
+              Process.sleep(1_000)
+              endpoint_init_checker_function.(count + 1, endpoint_module, endpoint_init_checker_function)
+          end
+
+        _, _, _ ->
+          :noop
+      end
+
+      if is_list(endpoint) do
+        endpoint
+        |> Enum.each(fn {endpoint_module, _} ->
+          Task.start(fn ->
+            endpoint_init_checker.(0, endpoint_module, endpoint_init_checker)
+          end)
+        end)
+      else
+        Task.start(fn ->
+          endpoint_init_checker.(0, endpoint, endpoint_init_checker)
+        end)
+      end
     end
 
     defp http_events(metric_prefix, opts) do
